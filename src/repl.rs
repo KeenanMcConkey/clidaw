@@ -81,11 +81,12 @@ fn event_loop(
     // Channel to signal the monitor thread to shut down
     let (shutdown_tx, shutdown_rx) = std_mpsc::channel::<()>();
 
-    // Spawn a background thread that checks for keys that haven't been updated recently
-    if !has_key_release {
+    // Spawn a background thread that checks for keys that haven't been updated recently.
+    // The thread will exit when it receives a shutdown signal via shutdown_rx channel.
+    let _monitor_thread = if !has_key_release {
         let keys_clone = Arc::clone(&active_keys);
         let tx_clone = release_tx.clone();
-        std::thread::spawn(move || {
+        Some(std::thread::spawn(move || {
             loop {
                 // Check for shutdown signal
                 if shutdown_rx.try_recv().is_ok() {
@@ -111,8 +112,10 @@ fn event_loop(
                     let _ = tx_clone.send(key);
                 }
             }
-        });
-    }
+        }))
+    } else {
+        None
+    };
 
     loop {
         // Drain any release messages from the monitor thread
