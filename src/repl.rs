@@ -24,19 +24,21 @@ pub fn run() -> Result<(), String> {
     terminal::enable_raw_mode().map_err(|e| format!("failed to enable raw mode: {}", e))?;
     execute!(stdout, EnterAlternateScreen).map_err(|e| format!("alternate screen: {}", e))?;
 
-    // Enable keyboard enhancement for key release detection.
-    // On macOS, the terminal may accept the enhancement flag but not actually
-    // send release events, so we disable it and use the fallback timer.
-    let has_key_release = if cfg!(target_os = "macos") {
-        false
-    } else {
-        queue!(
-            stdout,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
-        )
-        .is_ok()
-            && stdout.flush().is_ok()
-    };
+    // Enable keyboard enhancement for key release and repeat detection.
+    // We always try to enable it, and use a hybrid approach:
+    // - If Release events work, great!
+    // - If only Repeat events work, we use those to detect held keys
+    // - If neither work reliably, we fall back to timeout-based release
+    let kb_enhanced = queue!(
+        stdout,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+    )
+    .is_ok()
+        && stdout.flush().is_ok();
+    
+    // On macOS, even if enhancement succeeds, Release events may not work
+    // so we always use the fallback logic there
+    let has_key_release = kb_enhanced && !cfg!(target_os = "macos");
 
     let mut octave: u8 = 4;
 
@@ -49,7 +51,7 @@ pub fn run() -> Result<(), String> {
     std::thread::sleep(Duration::from_millis(20));
     let _ = engine.send(LiveCommand::Shutdown);
 
-    if has_key_release {
+    if kb_enhanced {
         let _ = execute!(
             stdout,
             crossterm::event::PopKeyboardEnhancementFlags,
