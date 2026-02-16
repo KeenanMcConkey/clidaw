@@ -108,6 +108,12 @@ fn event_loop(
                 if let Some((note_name, oct_offset)) = char_to_note(c) {
                     let effective_octave = octave.saturating_add(oct_offset).min(8);
                     let freq = note_name.to_freq(effective_octave);
+                    
+                    // Fallback: no key release support — stop note before starting new one
+                    if !has_key_release {
+                        engine.send(LiveCommand::NoteOff { key: c })?;
+                    }
+                    
                     engine.send(LiveCommand::NoteOn { key: c, freq })?;
                     update_status(stdout, *octave, Some(format!("{:?}{}", note_name, effective_octave)));
 
