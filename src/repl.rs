@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::mpsc as std_mpsc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyboardEnhancementFlags,
@@ -22,19 +24,21 @@ pub fn run() -> Result<(), String> {
     terminal::enable_raw_mode().map_err(|e| format!("failed to enable raw mode: {}", e))?;
     execute!(stdout, EnterAlternateScreen).map_err(|e| format!("alternate screen: {}", e))?;
 
-    // Enable keyboard enhancement for key release detection.
-    // On macOS, the terminal may accept the enhancement flag but not actually
-    // send release events, so we disable it and use the fallback timer.
-    let has_key_release = if cfg!(target_os = "macos") {
-        false
-    } else {
-        queue!(
-            stdout,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
-        )
-        .is_ok()
-            && stdout.flush().is_ok()
-    };
+    // Enable keyboard enhancement for key release and repeat detection.
+    // We always try to enable it, and use a hybrid approach:
+    // - If Release events work, great!
+    // - If only Repeat events work, we use those to detect held keys
+    // - If neither work reliably, we fall back to timeout-based release
+    let kb_enhanced = queue!(
+        stdout,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+    )
+    .is_ok()
+        && stdout.flush().is_ok();
+
+    // On macOS, even if enhancement succeeds, Release events may not work
+    // so we always use the fallback logic there
+    let has_key_release = kb_enhanced && !cfg!(target_os = "macos");
 
     let mut octave: u8 = 4;
 
@@ -47,7 +51,7 @@ pub fn run() -> Result<(), String> {
     std::thread::sleep(Duration::from_millis(20));
     let _ = engine.send(LiveCommand::Shutdown);
 
-    if has_key_release {
+    if kb_enhanced {
         let _ = execute!(
             stdout,
             crossterm::event::PopKeyboardEnhancementFlags,
@@ -67,15 +71,58 @@ fn event_loop(
     octave: &mut u8,
     has_key_release: bool,
 ) -> Result<(), String> {
-    // For the fallback path: a channel that receives (key, instant) from
-    // timer threads so the main loop can send NoteOff at the right time.
-    let (fallback_tx, fallback_rx) = std_mpsc::channel::<char>();
+    // For the fallback path: track when each key was last pressed/repeated
+    // so we can detect when a key is released (no more repeat events)
+    let active_keys: Arc<Mutex<HashMap<char, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+
+    // Channel to receive keys that should be released
+    let (release_tx, release_rx) = std_mpsc::channel::<char>();
+
+    // Channel to signal the monitor thread to shut down
+    let (shutdown_tx, shutdown_rx) = std_mpsc::channel::<()>();
+
+    // Spawn a background thread that checks for keys that haven't been updated recently.
+    // The thread will exit when it receives a shutdown signal via shutdown_rx channel.
+    let _monitor_thread = if !has_key_release {
+        let keys_clone = Arc::clone(&active_keys);
+        let tx_clone = release_tx.clone();
+        Some(std::thread::spawn(move || {
+            loop {
+                // Check for shutdown signal
+                if shutdown_rx.try_recv().is_ok() {
+                    break;
+                }
+
+                std::thread::sleep(Duration::from_millis(50));
+                let now = Instant::now();
+                let mut keys = keys_clone.lock().unwrap();
+                let mut to_release = Vec::new();
+
+                // Find keys that haven't been updated in the last 100ms
+                // (meaning no repeat events, so the key was released)
+                for (key, last_time) in keys.iter() {
+                    if now.duration_since(*last_time) > Duration::from_millis(100) {
+                        to_release.push(*key);
+                    }
+                }
+
+                // Remove and send release events for stale keys
+                for key in to_release {
+                    keys.remove(&key);
+                    let _ = tx_clone.send(key);
+                }
+            }
+        }))
+    } else {
+        None
+    };
 
     loop {
-        // Drain any fallback NoteOff messages from timer threads
+        // Drain any release messages from the monitor thread
         if !has_key_release {
-            while let Ok(key) = fallback_rx.try_recv() {
+            while let Ok(key) = release_rx.try_recv() {
                 engine.send(LiveCommand::NoteOff { key })?;
+                update_status(stdout, *octave, None);
             }
         }
 
@@ -93,6 +140,8 @@ fn event_loop(
                 kind: KeyEventKind::Press,
                 ..
             }) => {
+                // Signal the monitor thread to shut down
+                let _ = shutdown_tx.send(());
                 return Ok(());
             }
 
@@ -114,23 +163,31 @@ fn event_loop(
                 if let Some((note_name, oct_offset)) = char_to_note(c) {
                     let effective_octave = octave.saturating_add(oct_offset).min(8);
                     let freq = note_name.to_freq(effective_octave);
-                    
-                    // Fallback: no key release support — stop note before starting new one
-                    if !has_key_release {
-                        engine.send(LiveCommand::NoteOff { key: c })?;
-                    }
-                    
-                    engine.send(LiveCommand::NoteOn { key: c, freq })?;
-                    update_status(stdout, *octave, Some(format!("{:?}{}", note_name, effective_octave)));
 
-                    // Fallback: no key release support — auto-off after 300ms
+                    engine.send(LiveCommand::NoteOn { key: c, freq })?;
+                    update_status(
+                        stdout,
+                        *octave,
+                        Some(format!("{:?}{}", note_name, effective_octave)),
+                    );
+
+                    // Track this key as active for the fallback path
                     if !has_key_release {
-                        let tx = fallback_tx.clone();
-                        std::thread::spawn(move || {
-                            std::thread::sleep(Duration::from_millis(300));
-                            let _ = tx.send(c);
-                        });
+                        let mut keys = active_keys.lock().unwrap();
+                        keys.insert(c, Instant::now());
                     }
+                }
+            }
+
+            Event::Key(KeyEvent {
+                code: KeyCode::Char(c),
+                kind: KeyEventKind::Repeat,
+                ..
+            }) => {
+                // Key is being held - update its timestamp so it doesn't get released
+                if !has_key_release && char_to_note(c).is_some() {
+                    let mut keys = active_keys.lock().unwrap();
+                    keys.insert(c, Instant::now());
                 }
             }
 
