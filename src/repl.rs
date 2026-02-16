@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::mpsc as std_mpsc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyboardEnhancementFlags,
@@ -67,15 +69,47 @@ fn event_loop(
     octave: &mut u8,
     has_key_release: bool,
 ) -> Result<(), String> {
-    // For the fallback path: a channel that receives (key, instant) from
-    // timer threads so the main loop can send NoteOff at the right time.
-    let (fallback_tx, fallback_rx) = std_mpsc::channel::<char>();
+    // For the fallback path: track when each key was last pressed/repeated
+    // so we can detect when a key is released (no more repeat events)
+    let active_keys: Arc<Mutex<HashMap<char, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+    
+    // Channel to receive keys that should be released
+    let (release_tx, release_rx) = std_mpsc::channel::<char>();
+
+    // Spawn a background thread that checks for keys that haven't been updated recently
+    if !has_key_release {
+        let keys_clone = Arc::clone(&active_keys);
+        let tx_clone = release_tx.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(50));
+                let now = Instant::now();
+                let mut keys = keys_clone.lock().unwrap();
+                let mut to_release = Vec::new();
+                
+                // Find keys that haven't been updated in the last 100ms
+                // (meaning no repeat events, so the key was released)
+                for (key, last_time) in keys.iter() {
+                    if now.duration_since(*last_time) > Duration::from_millis(100) {
+                        to_release.push(*key);
+                    }
+                }
+                
+                // Remove and send release events for stale keys
+                for key in to_release {
+                    keys.remove(&key);
+                    let _ = tx_clone.send(key);
+                }
+            }
+        });
+    }
 
     loop {
-        // Drain any fallback NoteOff messages from timer threads
+        // Drain any release messages from the monitor thread
         if !has_key_release {
-            while let Ok(key) = fallback_rx.try_recv() {
+            while let Ok(key) = release_rx.try_recv() {
                 engine.send(LiveCommand::NoteOff { key })?;
+                update_status(stdout, *octave, None);
             }
         }
 
@@ -115,22 +149,26 @@ fn event_loop(
                     let effective_octave = octave.saturating_add(oct_offset).min(8);
                     let freq = note_name.to_freq(effective_octave);
                     
-                    // Fallback: no key release support — stop note before starting new one
-                    if !has_key_release {
-                        engine.send(LiveCommand::NoteOff { key: c })?;
-                    }
-                    
                     engine.send(LiveCommand::NoteOn { key: c, freq })?;
                     update_status(stdout, *octave, Some(format!("{:?}{}", note_name, effective_octave)));
 
-                    // Fallback: no key release support — auto-off after 300ms
+                    // Track this key as active for the fallback path
                     if !has_key_release {
-                        let tx = fallback_tx.clone();
-                        std::thread::spawn(move || {
-                            std::thread::sleep(Duration::from_millis(300));
-                            let _ = tx.send(c);
-                        });
+                        let mut keys = active_keys.lock().unwrap();
+                        keys.insert(c, Instant::now());
                     }
+                }
+            }
+
+            Event::Key(KeyEvent {
+                code: KeyCode::Char(c),
+                kind: KeyEventKind::Repeat,
+                ..
+            }) => {
+                // Key is being held - update its timestamp so it doesn't get released
+                if !has_key_release && char_to_note(c).is_some() {
+                    let mut keys = active_keys.lock().unwrap();
+                    keys.insert(c, Instant::now());
                 }
             }
 
