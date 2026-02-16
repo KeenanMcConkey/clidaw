@@ -1,0 +1,9 @@
+# Demo Song
+tempo: 120
+octave: 4
+
+# C major scale
+a s d f g h j k |
+
+# Chord progression (C - F - G - C)
+[adg] [fhk] [gdl] [adg]
