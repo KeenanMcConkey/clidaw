@@ -23,12 +23,18 @@ pub fn run() -> Result<(), String> {
     execute!(stdout, EnterAlternateScreen).map_err(|e| format!("alternate screen: {}", e))?;
 
     // Enable keyboard enhancement for key release detection.
-    let has_key_release = queue!(
-        stdout,
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
-    )
-    .is_ok()
-        && stdout.flush().is_ok();
+    // On macOS, the terminal may accept the enhancement flag but not actually
+    // send release events, so we disable it and use the fallback timer.
+    let has_key_release = if cfg!(target_os = "macos") {
+        false
+    } else {
+        queue!(
+            stdout,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+        )
+        .is_ok()
+            && stdout.flush().is_ok()
+    };
 
     let mut octave: u8 = 4;
 
