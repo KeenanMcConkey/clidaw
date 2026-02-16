@@ -49,7 +49,10 @@ fn main() {
                 comp.tempo = t;
             }
 
-            println!("Playing: {} BPM, {}/{} time", comp.tempo, comp.time_signature.0, comp.time_signature.1);
+            println!(
+                "Playing: {} BPM, {}/{} time",
+                comp.tempo, comp.time_signature.0, comp.time_signature.1
+            );
             println!();
 
             if let Err(e) = synth::play(&comp) {
@@ -87,7 +90,10 @@ fn parse_input(input: &str) -> note::Composition {
 
 fn print_composition(comp: &note::Composition) {
     println!("Tempo: {} BPM", comp.tempo);
-    println!("Time signature: {}/{}", comp.time_signature.0, comp.time_signature.1);
+    println!(
+        "Time signature: {}/{}",
+        comp.time_signature.0, comp.time_signature.1
+    );
     println!("Tracks: {}", comp.tracks.len());
     println!();
     for track in &comp.tracks {
@@ -95,7 +101,12 @@ fn print_composition(comp: &note::Composition) {
         for event in &track.events {
             match event {
                 note::Event::Note(n) => {
-                    println!("  {:?} (octave {}, {:.1} Hz)", n.note, n.octave, n.note.to_freq(n.octave));
+                    println!(
+                        "  {:?} (octave {}, {:.1} Hz)",
+                        n.note,
+                        n.octave,
+                        n.note.to_freq(n.octave)
+                    );
                 }
                 note::Event::Chord(notes) => {
                     let desc: Vec<String> = notes
@@ -105,7 +116,11 @@ fn print_composition(comp: &note::Composition) {
                     println!("  Chord [{}]", desc.join(" "));
                 }
                 note::Event::Rest(beats) => {
-                    println!("  Rest ({} beat{})", beats, if *beats != 1.0 { "s" } else { "" });
+                    println!(
+                        "  Rest ({} beat{})",
+                        beats,
+                        if *beats != 1.0 { "s" } else { "" }
+                    );
                 }
                 note::Event::BarLine => {
                     println!("  |");

@@ -35,7 +35,7 @@ pub fn run() -> Result<(), String> {
     )
     .is_ok()
         && stdout.flush().is_ok();
-    
+
     // On macOS, even if enhancement succeeds, Release events may not work
     // so we always use the fallback logic there
     let has_key_release = kb_enhanced && !cfg!(target_os = "macos");
@@ -74,10 +74,10 @@ fn event_loop(
     // For the fallback path: track when each key was last pressed/repeated
     // so we can detect when a key is released (no more repeat events)
     let active_keys: Arc<Mutex<HashMap<char, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
-    
+
     // Channel to receive keys that should be released
     let (release_tx, release_rx) = std_mpsc::channel::<char>();
-    
+
     // Channel to signal the monitor thread to shut down
     let (shutdown_tx, shutdown_rx) = std_mpsc::channel::<()>();
 
@@ -92,12 +92,12 @@ fn event_loop(
                 if shutdown_rx.try_recv().is_ok() {
                     break;
                 }
-                
+
                 std::thread::sleep(Duration::from_millis(50));
                 let now = Instant::now();
                 let mut keys = keys_clone.lock().unwrap();
                 let mut to_release = Vec::new();
-                
+
                 // Find keys that haven't been updated in the last 100ms
                 // (meaning no repeat events, so the key was released)
                 for (key, last_time) in keys.iter() {
@@ -105,7 +105,7 @@ fn event_loop(
                         to_release.push(*key);
                     }
                 }
-                
+
                 // Remove and send release events for stale keys
                 for key in to_release {
                     keys.remove(&key);
@@ -163,9 +163,13 @@ fn event_loop(
                 if let Some((note_name, oct_offset)) = char_to_note(c) {
                     let effective_octave = octave.saturating_add(oct_offset).min(8);
                     let freq = note_name.to_freq(effective_octave);
-                    
+
                     engine.send(LiveCommand::NoteOn { key: c, freq })?;
-                    update_status(stdout, *octave, Some(format!("{:?}{}", note_name, effective_octave)));
+                    update_status(
+                        stdout,
+                        *octave,
+                        Some(format!("{:?}{}", note_name, effective_octave)),
+                    );
 
                     // Track this key as active for the fallback path
                     if !has_key_release {
