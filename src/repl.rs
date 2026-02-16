@@ -77,6 +77,9 @@ fn event_loop(
     
     // Channel to receive keys that should be released
     let (release_tx, release_rx) = std_mpsc::channel::<char>();
+    
+    // Channel to signal the monitor thread to shut down
+    let (shutdown_tx, shutdown_rx) = std_mpsc::channel::<()>();
 
     // Spawn a background thread that checks for keys that haven't been updated recently
     if !has_key_release {
@@ -84,6 +87,11 @@ fn event_loop(
         let tx_clone = release_tx.clone();
         std::thread::spawn(move || {
             loop {
+                // Check for shutdown signal
+                if shutdown_rx.try_recv().is_ok() {
+                    break;
+                }
+                
                 std::thread::sleep(Duration::from_millis(50));
                 let now = Instant::now();
                 let mut keys = keys_clone.lock().unwrap();
@@ -129,6 +137,8 @@ fn event_loop(
                 kind: KeyEventKind::Press,
                 ..
             }) => {
+                // Signal the monitor thread to shut down
+                let _ = shutdown_tx.send(());
                 return Ok(());
             }
 
