@@ -22,8 +22,7 @@ pub fn run() -> Result<(), String> {
     terminal::enable_raw_mode().map_err(|e| format!("failed to enable raw mode: {}", e))?;
     execute!(stdout, EnterAlternateScreen).map_err(|e| format!("alternate screen: {}", e))?;
 
-    // Try to enable keyboard enhancement (key release detection).
-    // This silently fails on terminals that don't support it.
+    // Enable keyboard enhancement for key release detection.
     let has_key_release = queue!(
         stdout,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
@@ -33,19 +32,9 @@ pub fn run() -> Result<(), String> {
 
     let mut octave: u8 = 4;
 
-    print_banner(&mut stdout, octave, has_key_release);
+    print_banner(&mut stdout, octave);
 
-    // For terminals without key release: track auto-off timers
-    let (off_tx, off_rx) = std_mpsc::channel::<char>();
-
-    let result = event_loop(
-        &engine,
-        &mut stdout,
-        &mut octave,
-        has_key_release,
-        &off_tx,
-        &off_rx,
-    );
+    let result = event_loop(&engine, &mut stdout, &mut octave, has_key_release);
 
     // Restore terminal
     let _ = engine.send(LiveCommand::AllNotesOff);
@@ -71,16 +60,19 @@ fn event_loop(
     stdout: &mut io::Stdout,
     octave: &mut u8,
     has_key_release: bool,
-    off_tx: &std_mpsc::Sender<char>,
-    off_rx: &std_mpsc::Receiver<char>,
 ) -> Result<(), String> {
+    // For the fallback path: a channel that receives (key, instant) from
+    // timer threads so the main loop can send NoteOff at the right time.
+    let (fallback_tx, fallback_rx) = std_mpsc::channel::<char>();
+
     loop {
-        // Check for any pending auto-off messages (non-blocking)
-        while let Ok(key) = off_rx.try_recv() {
-            engine.send(LiveCommand::NoteOff { key })?;
+        // Drain any fallback NoteOff messages from timer threads
+        if !has_key_release {
+            while let Ok(key) = fallback_rx.try_recv() {
+                engine.send(LiveCommand::NoteOff { key })?;
+            }
         }
 
-        // Poll for keyboard events (50ms timeout so we can also drain off_rx)
         if !event::poll(Duration::from_millis(50))
             .map_err(|e| format!("event poll error: {}", e))?
         {
@@ -119,9 +111,9 @@ fn event_loop(
                     engine.send(LiveCommand::NoteOn { key: c, freq })?;
                     update_status(stdout, *octave, Some(format!("{:?}{}", note_name, effective_octave)));
 
+                    // Fallback: no key release support — auto-off after 300ms
                     if !has_key_release {
-                        // Schedule auto note-off after 300ms
-                        let tx = off_tx.clone();
+                        let tx = fallback_tx.clone();
                         std::thread::spawn(move || {
                             std::thread::sleep(Duration::from_millis(300));
                             let _ = tx.send(c);
@@ -146,15 +138,8 @@ fn event_loop(
     }
 }
 
-fn print_banner(stdout: &mut io::Stdout, octave: u8, has_key_release: bool) {
-    let release_info = if has_key_release {
-        "key release detected - hold keys to sustain"
-    } else {
-        "no key release support - notes auto-stop after 300ms"
-    };
-
-    let banner = format!(
-        "\x1b[2J\x1b[H\
+fn print_banner(stdout: &mut io::Stdout, octave: u8) {
+    let banner = "\x1b[2J\x1b[H\
 clidaw live - interactive keyboard mode\r\n\
 ─────────────────────────────────────────\r\n\
 \r\n\
@@ -166,18 +151,13 @@ clidaw live - interactive keyboard mode\r\n\
 \r\n\
   Octave (1-8):   press number keys\r\n\
   Quit:           Esc\r\n\
-\r\n\
-  {}\r\n\
-\r\n",
-        release_info
-    );
+\r\n";
     let _ = write!(stdout, "{}", banner);
     update_status(stdout, octave, None);
 }
 
 fn update_status(stdout: &mut io::Stdout, octave: u8, note: Option<String>) {
     let note_display = note.unwrap_or_else(|| "---".to_string());
-    // Move to a fixed line for status, clear it, write status
     let _ = write!(
         stdout,
         "\x1b[16;1H\x1b[2K  Octave: {}  |  Note: {}\r",

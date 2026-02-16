@@ -171,7 +171,7 @@ clidaw patch-editor bass.patch
 - [ ] ADSR envelope support
 - [ ] Basic filter implementation
 - [ ] WAV file rendering
-- [ ] Real-time playback
+- [X] Real-time playback
 
 ### Planned Features (v0.2+)
 
