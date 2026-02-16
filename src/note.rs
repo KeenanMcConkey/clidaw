@@ -69,6 +69,7 @@ pub enum Event {
 
 /// A named track with its own settings and events
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Track {
     pub name: String,
     pub patch: Option<String>,

@@ -150,7 +150,7 @@ pub fn parse(input: &str) -> Result<Composition, ParseError> {
 }
 
 /// Parse a single line of note text into events
-fn parse_line(line: &str, octave: u8, line_num: usize) -> Result<Vec<Event>, ParseError> {
+fn parse_line(line: &str, octave: u8, _line_num: usize) -> Result<Vec<Event>, ParseError> {
     let mut events = Vec::new();
     let mut chars = line.chars().peekable();
 
