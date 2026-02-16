@@ -3,104 +3,163 @@ use std::sync::mpsc;
 
 use crate::note::{Composition, Event};
 
-/// A command sent to the audio thread
-enum AudioCommand {
-    /// Play a note at a given frequency for a duration in seconds
-    PlayNote { freq: f64, duration_secs: f64 },
-    /// Play multiple frequencies simultaneously
-    PlayChord { freqs: Vec<f64>, duration_secs: f64 },
-    /// Silence for a duration
-    Rest { duration_secs: f64 },
-    /// Stop the stream
-    Stop,
+/// A command sent to the audio engine
+pub enum LiveCommand {
+    /// Start playing a note triggered by a key
+    NoteOn { key: char, freq: f64 },
+    /// Stop a note triggered by a key
+    NoteOff { key: char },
+    /// Stop all notes
+    AllNotesOff,
+    /// Shut down the engine
+    Shutdown,
 }
 
-/// Play a composition through the default audio output
-pub fn play(comp: &Composition) -> Result<(), String> {
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or("no output audio device available")?;
+/// A single playing voice
+struct Voice {
+    key: char,
+    freq: f64,
+    phase: f64,
+    amplitude: f64,
+    target_amp: f64,
+    releasing: bool,
+}
 
-    let config = device
-        .default_output_config()
-        .map_err(|e| format!("failed to get default output config: {}", e))?;
+/// Audio engine that owns the cpal stream and accepts commands via a channel
+pub struct AudioEngine {
+    cmd_tx: mpsc::Sender<LiveCommand>,
+    // Hold the stream to keep it alive; dropping it stops audio
+    _stream: cpal::Stream,
+}
 
-    let sample_rate = config.sample_rate() as f64;
+/// Amplitude ramp time in seconds (prevents clicks)
+const RAMP_TIME: f64 = 0.005;
 
-    // Shared state for the audio callback
-    let (cmd_tx, cmd_rx) = mpsc::channel::<AudioCommand>();
+impl AudioEngine {
+    /// Create a new AudioEngine using the default audio output device
+    pub fn new() -> Result<Self, String> {
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or("no output audio device available")?;
 
-    // Audio generation state
-    let mut phase: f64 = 0.0;
-    let mut current_freqs: Vec<f64> = Vec::new();
-    let mut samples_remaining: usize = 0;
+        let config = device
+            .default_output_config()
+            .map_err(|e| format!("failed to get default output config: {}", e))?;
 
-    let stream = device
-        .build_output_stream(
-            &config.into(),
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                // Check for new commands (non-blocking)
-                if let Ok(cmd) = cmd_rx.try_recv() {
-                    match cmd {
-                        AudioCommand::PlayNote { freq, duration_secs } => {
-                            current_freqs = vec![freq];
-                            samples_remaining = (duration_secs * sample_rate) as usize;
-                            phase = 0.0;
-                        }
-                        AudioCommand::PlayChord { freqs, duration_secs } => {
-                            current_freqs = freqs;
-                            samples_remaining = (duration_secs * sample_rate) as usize;
-                            phase = 0.0;
-                        }
-                        AudioCommand::Rest { duration_secs } => {
-                            current_freqs.clear();
-                            samples_remaining = (duration_secs * sample_rate) as usize;
-                            phase = 0.0;
-                        }
-                        AudioCommand::Stop => {
-                            current_freqs.clear();
-                            samples_remaining = 0;
-                            for sample in data.iter_mut() {
-                                *sample = 0.0;
+        let sample_rate = config.sample_rate() as f64;
+        let ramp_increment = 1.0 / (RAMP_TIME * sample_rate);
+
+        let (cmd_tx, cmd_rx) = mpsc::channel::<LiveCommand>();
+
+        let mut voices: Vec<Voice> = Vec::new();
+
+        let stream = device
+            .build_output_stream(
+                &config.into(),
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    // Drain all pending commands
+                    while let Ok(cmd) = cmd_rx.try_recv() {
+                        match cmd {
+                            LiveCommand::NoteOn { key, freq } => {
+                                // If this key already has a voice, retrigger it
+                                if let Some(v) = voices.iter_mut().find(|v| v.key == key) {
+                                    v.freq = freq;
+                                    v.target_amp = 0.3;
+                                    v.releasing = false;
+                                } else {
+                                    voices.push(Voice {
+                                        key,
+                                        freq,
+                                        phase: 0.0,
+                                        amplitude: 0.0,
+                                        target_amp: 0.3,
+                                        releasing: false,
+                                    });
+                                }
                             }
-                            return;
+                            LiveCommand::NoteOff { key } => {
+                                for v in voices.iter_mut() {
+                                    if v.key == key {
+                                        v.target_amp = 0.0;
+                                        v.releasing = true;
+                                    }
+                                }
+                            }
+                            LiveCommand::AllNotesOff => {
+                                for v in voices.iter_mut() {
+                                    v.target_amp = 0.0;
+                                    v.releasing = true;
+                                }
+                            }
+                            LiveCommand::Shutdown => {
+                                voices.clear();
+                                for sample in data.iter_mut() {
+                                    *sample = 0.0;
+                                }
+                                return;
+                            }
                         }
                     }
-                }
 
-                for sample in data.iter_mut() {
-                    if samples_remaining > 0 && !current_freqs.is_empty() {
+                    for sample in data.iter_mut() {
                         let mut value = 0.0_f64;
-                        for freq in &current_freqs {
-                            value += (phase * freq * 2.0 * std::f64::consts::PI / sample_rate).sin();
+
+                        for voice in voices.iter_mut() {
+                            // Ramp amplitude toward target
+                            if voice.amplitude < voice.target_amp {
+                                voice.amplitude =
+                                    (voice.amplitude + ramp_increment).min(voice.target_amp);
+                            } else if voice.amplitude > voice.target_amp {
+                                voice.amplitude =
+                                    (voice.amplitude - ramp_increment).max(voice.target_amp);
+                            }
+
+                            if voice.amplitude > 0.0001 {
+                                value += (voice.phase * 2.0 * std::f64::consts::PI).sin()
+                                    * voice.amplitude;
+                                voice.phase += voice.freq / sample_rate;
+                                if voice.phase >= 1.0 {
+                                    voice.phase -= 1.0;
+                                }
+                            }
                         }
-                        // Normalize by number of voices and apply a gentle volume
-                        value = value / current_freqs.len() as f64 * 0.3;
+
+                        // Remove fully released voices
+                        voices.retain(|v| !(v.releasing && v.amplitude <= 0.0001));
+
                         *sample = value as f32;
-                        phase += 1.0;
-                        samples_remaining -= 1;
-                    } else if samples_remaining > 0 {
-                        // Rest: output silence
-                        *sample = 0.0;
-                        samples_remaining -= 1;
-                    } else {
-                        *sample = 0.0;
                     }
-                }
-            },
-            move |err| {
-                eprintln!("audio stream error: {}", err);
-            },
-            None,
-        )
-        .map_err(|e| format!("failed to build output stream: {}", e))?;
+                },
+                move |err| {
+                    eprintln!("audio stream error: {}", err);
+                },
+                None,
+            )
+            .map_err(|e| format!("failed to build output stream: {}", e))?;
 
-    stream
-        .play()
-        .map_err(|e| format!("failed to play stream: {}", e))?;
+        stream
+            .play()
+            .map_err(|e| format!("failed to play stream: {}", e))?;
 
-    // Calculate beat duration from tempo
+        Ok(AudioEngine {
+            cmd_tx,
+            _stream: stream,
+        })
+    }
+
+    /// Send a command to the audio thread
+    pub fn send(&self, cmd: LiveCommand) -> Result<(), String> {
+        self.cmd_tx
+            .send(cmd)
+            .map_err(|_| "audio thread disconnected".to_string())
+    }
+}
+
+/// Play a composition through the default audio output (batch mode)
+pub fn play(comp: &Composition) -> Result<(), String> {
+    let engine = AudioEngine::new()?;
+
     let beat_duration = 60.0 / comp.tempo as f64;
 
     for track in &comp.tracks {
@@ -109,38 +168,30 @@ pub fn play(comp: &Composition) -> Result<(), String> {
                 Event::Note(n) => {
                     let freq = n.note.to_freq(n.octave);
                     println!("  Playing {:?}{} ({:.1} Hz)", n.note, n.octave, freq);
-                    cmd_tx
-                        .send(AudioCommand::PlayNote {
-                            freq,
-                            duration_secs: beat_duration,
-                        })
-                        .map_err(|_| "audio thread disconnected")?;
-                    // Wait for the note duration
+                    engine.send(LiveCommand::NoteOn { key: '\0', freq })?;
                     std::thread::sleep(std::time::Duration::from_secs_f64(beat_duration));
+                    engine.send(LiveCommand::NoteOff { key: '\0' })?;
                 }
                 Event::Chord(notes) => {
-                    let freqs: Vec<f64> = notes.iter().map(|n| n.note.to_freq(n.octave)).collect();
                     let desc: Vec<String> = notes
                         .iter()
                         .map(|n| format!("{:?}{}", n.note, n.octave))
                         .collect();
                     println!("  Playing chord [{}]", desc.join(" "));
-                    cmd_tx
-                        .send(AudioCommand::PlayChord {
-                            freqs,
-                            duration_secs: beat_duration,
-                        })
-                        .map_err(|_| "audio thread disconnected")?;
+                    for (i, n) in notes.iter().enumerate() {
+                        let freq = n.note.to_freq(n.octave);
+                        // Use index as a fake key to allow polyphonic chord voices
+                        let key = char::from(b'0' + i as u8);
+                        engine.send(LiveCommand::NoteOn { key, freq })?;
+                    }
                     std::thread::sleep(std::time::Duration::from_secs_f64(beat_duration));
+                    engine.send(LiveCommand::AllNotesOff)?;
+                    // Brief ramp-down time
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                 }
                 Event::Rest(beats) => {
                     let rest_duration = beat_duration * beats;
                     println!("  Rest ({} beats)", beats);
-                    cmd_tx
-                        .send(AudioCommand::Rest {
-                            duration_secs: rest_duration,
-                        })
-                        .map_err(|_| "audio thread disconnected")?;
                     std::thread::sleep(std::time::Duration::from_secs_f64(rest_duration));
                 }
                 Event::BarLine => {
@@ -152,7 +203,7 @@ pub fn play(comp: &Composition) -> Result<(), String> {
 
     // Brief silence at the end so the last note rings out
     std::thread::sleep(std::time::Duration::from_millis(100));
-    let _ = cmd_tx.send(AudioCommand::Stop);
+    let _ = engine.send(LiveCommand::Shutdown);
 
     Ok(())
 }

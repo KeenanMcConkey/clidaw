@@ -3,7 +3,7 @@ use crate::note::*;
 /// Map a keyboard character to a (NoteName, octave_offset) pair.
 /// The octave_offset indicates notes that spill into the next octave
 /// on the keyboard layout (k, l, ;, ', o, p).
-fn char_to_note(c: char) -> Option<(NoteName, u8)> {
+pub fn char_to_note(c: char) -> Option<(NoteName, u8)> {
     match c {
         // Home row: natural notes
         'a' => Some((NoteName::C, 0)),

@@ -1,5 +1,6 @@
 mod note;
 mod parser;
+mod repl;
 mod synth;
 
 use clap::{Parser, Subcommand};
@@ -31,6 +32,9 @@ enum Command {
         /// Path to a .notes file
         file: PathBuf,
     },
+
+    /// Interactive keyboard mode — play notes by typing
+    Live,
 }
 
 fn main() {
@@ -57,6 +61,12 @@ fn main() {
             let input = read_file(&file);
             let comp = parse_input(&input);
             print_composition(&comp);
+        }
+        Command::Live => {
+            if let Err(e) = repl::run() {
+                eprintln!("Live mode error: {}", e);
+                std::process::exit(1);
+            }
         }
     }
 }
