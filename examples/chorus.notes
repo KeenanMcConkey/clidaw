@@ -1,0 +1,7 @@
+# Chorus: one bar (4 beats), busier bass
+beats: 4
+loop: false
+octave: 3
+
+# Driving eighth-note feel
+a a f f | g g d d |

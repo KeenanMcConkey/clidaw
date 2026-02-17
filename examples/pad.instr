@@ -1,0 +1,5 @@
+# Slow pad / strings
+attack: 0.2
+decay: 0.3
+sustain: 0.8
+release: 0.5

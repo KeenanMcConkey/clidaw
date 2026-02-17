@@ -67,7 +67,16 @@ pub enum Event {
     BarLine,
 }
 
-/// A named track with its own settings and events
+/// Duration in beats of a single event (Note = 1, Chord = 1, Rest = beats, BarLine = 0)
+pub fn event_duration(e: &Event) -> f64 {
+    match e {
+        Event::Note(_) | Event::Chord(_) => 1.0,
+        Event::Rest(beats) => *beats,
+        Event::BarLine => 0.0,
+    }
+}
+
+/// A named track with its own settings and events (used for legacy Composition)
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Track {
@@ -77,7 +86,7 @@ pub struct Track {
     pub events: Vec<Event>,
 }
 
-/// A full parsed composition
+/// A full parsed composition (legacy: single linear play-through)
 #[derive(Debug, Clone)]
 pub struct Composition {
     pub tempo: u32,
@@ -95,6 +104,35 @@ impl Composition {
             default_octave: 4,
             default_patch: None,
             tracks: Vec::new(),
+        }
+    }
+}
+
+/// A note pattern: a fixed number of beats (e.g. one bar) that can be repeated in a song.
+/// Used for .notes files: defines one pattern with optional explicit length and loop flag.
+#[derive(Debug, Clone)]
+pub struct Pattern {
+    /// Length of this pattern in beats. If None, computed from events.
+    pub beats: f64,
+    /// Whether this pattern loops when used in a song (for display/editor use; playback uses song's repeat counts).
+    pub loop_pattern: bool,
+    pub time_signature: (u8, u8),
+    pub default_octave: u8,
+    pub events: Vec<Event>,
+}
+
+impl Pattern {
+    /// Total beats of the pattern (sum of event durations)
+    pub fn computed_beats(&self) -> f64 {
+        self.events.iter().map(event_duration).sum()
+    }
+
+    /// Effective pattern length in beats (explicit if set and positive, else computed)
+    pub fn length_beats(&self) -> f64 {
+        if self.beats > 0.0 {
+            self.beats
+        } else {
+            self.computed_beats()
         }
     }
 }

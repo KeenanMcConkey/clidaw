@@ -121,7 +121,7 @@ fn event_loop(
         // Drain any release messages from the monitor thread
         if !has_key_release {
             while let Ok(key) = release_rx.try_recv() {
-                engine.send(LiveCommand::NoteOff { key })?;
+                engine.send(LiveCommand::NoteOff { track: 0, key })?;
                 update_status(stdout, *octave, None);
             }
         }
@@ -164,7 +164,11 @@ fn event_loop(
                     let effective_octave = octave.saturating_add(oct_offset).min(8);
                     let freq = note_name.to_freq(effective_octave);
 
-                    engine.send(LiveCommand::NoteOn { key: c, freq })?;
+                    engine.send(LiveCommand::NoteOn {
+                        track: 0,
+                        key: c,
+                        freq,
+                    })?;
                     update_status(
                         stdout,
                         *octave,
@@ -197,7 +201,10 @@ fn event_loop(
                 ..
             }) => {
                 if char_to_note(c).is_some() {
-                    engine.send(LiveCommand::NoteOff { key: c })?;
+                    engine.send(LiveCommand::NoteOff {
+                    track: 0,
+                    key: c,
+                })?;
                     update_status(stdout, *octave, None);
                 }
             }

@@ -1,0 +1,7 @@
+# Melody: one bar (4 beats), repeats for full song
+beats: 4
+loop: true
+octave: 5
+
+# Simple line
+a s d f | g h j k |

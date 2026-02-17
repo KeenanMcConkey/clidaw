@@ -1,0 +1,5 @@
+# Short pluck (e.g. bass or keys)
+attack: 0.005
+decay: 0.08
+sustain: 0.3
+release: 0.15

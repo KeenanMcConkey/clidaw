@@ -1,0 +1,7 @@
+# Verse: one bar (4 beats), bass pattern
+beats: 4
+loop: false
+octave: 3
+
+# Root-fifth pattern
+a --- a --- | f --- f --- |

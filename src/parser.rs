@@ -1,4 +1,4 @@
-use crate::note::*;
+use crate::note::{Composition, Event, NoteEvent, NoteName, Pattern, Track, event_duration};
 
 /// Map a keyboard character to a (NoteName, octave_offset) pair.
 /// The octave_offset indicates notes that spill into the next octave
@@ -44,7 +44,93 @@ impl std::fmt::Display for ParseError {
     }
 }
 
-/// Parse a .notes file into a Composition
+/// Parse a .notes file into a Pattern (one pattern = fixed beats, loop flag, single event list).
+pub fn parse_pattern(input: &str) -> Result<Pattern, ParseError> {
+    let mut beats: f64 = 0.0; // 0 = "compute from events"
+    let mut loop_pattern = false;
+    let mut time_signature = (4u8, 4u8);
+    let mut default_octave = 4u8;
+    let mut current_octave = 4u8;
+    let mut events: Vec<Event> = Vec::new();
+
+    for (line_idx, line) in input.lines().enumerate() {
+        let line_num = line_idx + 1;
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if let Some(value) = trimmed.strip_prefix("beats:") {
+            beats = value.trim().parse().map_err(|_| ParseError {
+                line: line_num,
+                message: format!("invalid beats: {}", value.trim()),
+            })?;
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("loop:") {
+            loop_pattern = value.trim().eq_ignore_ascii_case("true")
+                || value.trim().eq_ignore_ascii_case("1")
+                || value.trim().eq_ignore_ascii_case("yes");
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("time_signature:") {
+            let parts: Vec<&str> = value.trim().split('/').collect();
+            if parts.len() == 2 {
+                let num: u8 = parts[0].parse().map_err(|_| ParseError {
+                    line: line_num,
+                    message: "invalid time signature numerator".into(),
+                })?;
+                let den: u8 = parts[1].parse().map_err(|_| ParseError {
+                    line: line_num,
+                    message: "invalid time signature denominator".into(),
+                })?;
+                time_signature = (num, den);
+            }
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("octave:") {
+            let oct: u8 = value.trim().parse().map_err(|_| ParseError {
+                line: line_num,
+                message: format!("invalid octave: {}", value.trim()),
+            })?;
+            if oct > 8 {
+                return Err(ParseError {
+                    line: line_num,
+                    message: "octave must be 0-8".into(),
+                });
+            }
+            default_octave = oct;
+            current_octave = oct;
+            continue;
+        }
+
+        // Track headers are ignored for pattern: one flat event list
+        if trimmed.starts_with("[track:") && trimmed.ends_with(']') {
+            current_octave = default_octave;
+            continue;
+        }
+        if trimmed.starts_with("patch:") {
+            continue;
+        }
+
+        let line_events = parse_line(trimmed, current_octave, line_num)?;
+        events.extend(line_events);
+    }
+
+    let computed: f64 = events.iter().map(event_duration).sum();
+    let pattern_beats = if beats > 0.0 { beats } else { computed };
+
+    Ok(Pattern {
+        beats: pattern_beats,
+        loop_pattern,
+        time_signature,
+        default_octave,
+        events,
+    })
+}
+
+/// Parse a .notes file into a Composition (legacy: multi-track, used for Parse display).
 pub fn parse(input: &str) -> Result<Composition, ParseError> {
     let mut comp = Composition::new();
     let mut current_track_events: Vec<Event> = Vec::new();
@@ -310,5 +396,23 @@ a --- a ---";
         let input = "# this is a comment\na s d";
         let comp = parse(input).unwrap();
         assert_eq!(comp.tracks[0].events.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_pattern_beats_and_loop() {
+        let input = "beats: 4\nloop: true\noctave: 4\na s d f";
+        let pattern = parse_pattern(input).unwrap();
+        assert_eq!(pattern.beats, 4.0);
+        assert!(pattern.loop_pattern);
+        assert_eq!(pattern.default_octave, 4);
+        assert_eq!(pattern.events.len(), 4);
+    }
+
+    #[test]
+    fn test_parse_pattern_computed_beats() {
+        let input = "octave: 4\na s d f";
+        let pattern = parse_pattern(input).unwrap();
+        assert_eq!(pattern.computed_beats(), 4.0);
+        assert_eq!(pattern.length_beats(), 4.0);
     }
 }

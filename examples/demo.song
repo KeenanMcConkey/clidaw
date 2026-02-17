@@ -1,0 +1,10 @@
+# Demo song: bass plays verse 4x then chorus 4x; lead plays melody 8x
+tempo: 120
+time_signature: 4/4
+
+instrument: pluck.instr
+verse.notes * 4
+chorus.notes * 4
+
+instrument: pad.instr
+melody.notes * 8
